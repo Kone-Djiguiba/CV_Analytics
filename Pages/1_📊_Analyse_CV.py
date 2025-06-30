@@ -6,7 +6,6 @@ import re
 import pandas as pd
 from datetime import datetime
 import os
-import ast
 import hashlib
 import tempfile
 
@@ -109,9 +108,100 @@ def extract_languages(text):
     
     return found_languages if found_languages else ["Non spécifié"]
 
+def calculate_match_score(candidate, req_skills, min_exp, req_langs):
+    """Calcule un pourcentage de correspondance"""
+    total_score = 0
+    
+    # Compétences (50% du score)
+    matched_skills = sum(1 for skill in req_skills if skill.lower() in [s.lower() for s in candidate['Compétences']])
+    skill_score = (matched_skills / len(req_skills)) * 50 if req_skills else 0
+    
+    # Expérience (30% du score)
+    exp_score = 30 if candidate['Expérience'] >= min_exp else (
+        (candidate['Expérience'] / min_exp) * 30 if min_exp > 0 else 0
+    )
+    
+    # Langues (20% du score)
+    matched_langs = sum(1 for lang in req_langs if lang.lower() in [l.lower() for l in candidate['Langues']])
+    lang_score = (matched_langs / len(req_langs)) * 20 if req_langs else 0
+    
+    total_score = skill_score + exp_score + lang_score
+    return round(min(total_score, 100))  # Limite à 100%
+
+def show_results(data, req_skills, min_exp, req_langs):
+    df = pd.DataFrame(data)
+    
+    # Ajout du score de correspondance
+    df['Score'] = df.apply(
+        lambda x: calculate_match_score(x, req_skills, min_exp, req_langs),
+        axis=1
+    )
+    
+    # Tri par score décroissant
+    df = df.sort_values('Score', ascending=False)
+    
+    # Filtrage strict (pour information)
+    filtered = df[
+        df["Compétences"].apply(lambda x: any(skill.lower() in [s.lower() for s in x] for skill in req_skills)) &
+        (df["Expérience"] >= min_exp) &
+        df["Langues"].apply(lambda x: any(lang.lower() in [l.lower() for l in x] for lang in req_langs))
+    ]
+    
+    # Affichage des critères de recherche
+    with st.expander("🔍 Critères de Recherche Actuels", expanded=True):
+        cols = st.columns(3)
+        with cols[0]:
+            st.markdown("**Compétences Requises**")
+            st.write(", ".join(req_skills) or "Aucune spécifiée")
+        with cols[1]:
+            st.markdown("**Expérience Minimum**")
+            st.write(f"{min_exp} ans")
+        with cols[2]:
+            st.markdown("**Langues Requises**")
+            st.write(", ".join(req_langs) or "Aucune spécifiée")
+    
+    # Résumé des correspondances
+    st.markdown("---")
+    if len(filtered) > 0:
+        st.success(f"✅ {len(filtered)} CV correspondent parfaitement aux critères")
+    else:
+        st.warning("ℹ️ Aucun CV ne correspond parfaitement aux critères")
+    
+    # Affichage de tous les CV avec score
+    st.subheader("📋 Tous les CV Analysés")
+    for _, row in df.iterrows():
+        with st.expander(f"{row['Nom']} - {row['Fichier']} (Score: {row['Score']}%)", expanded=False):
+            cols = st.columns([1, 3])
+            
+            # Indicateur visuel
+            with cols[0]:
+                if row['Score'] >= 70:
+                    st.success("Bonne correspondance")
+                elif row['Score'] >= 30:
+                    st.warning("Correspondance partielle")
+                else:
+                    st.error("Faible correspondance")
+                
+                st.metric("Score Global", f"{row['Score']}%")
+            
+            # Détails du CV
+            with cols[1]:
+                st.markdown(f"**Compétences:** {', '.join(row['Compétences'])}")
+                st.markdown(f"**Expérience:** {row['Expérience']} ans")
+                st.markdown(f"**Langues:** {', '.join(row['Langues'])}")
+                
+                # Boutons d'action
+                st.download_button(
+                    "📥 Télécharger l'analyse",
+                    data=pd.DataFrame([row]).to_csv(index=False),
+                    file_name=f"analyse_{row['Nom']}.csv",
+                    key=f"dl_{row['Hash']}"
+                )
+
 def analyze_cvs():
     st.title("📊 Analyse Automatique de CV")
     
+    # Section critères
     with st.expander("🔍 Paramètres d'analyse", expanded=True):
         cols = st.columns(3)
         with cols[0]:
@@ -121,6 +211,7 @@ def analyze_cvs():
         with cols[2]:
             langues = st.multiselect("Langues", ["Anglais", "Français", "Espagnol"])
     
+    # Upload fichiers
     files = st.file_uploader("Téléverser des CV (PDF/DOCX)", type=["pdf", "docx"], accept_multiple_files=True)
     
     if files:
@@ -137,6 +228,7 @@ def process_files(files, required_skills, min_exp, required_langs):
             
             text = extract_text_from_pdf(file_bytes) if file.name.endswith(".pdf") else extract_text_from_docx(file_bytes)
             
+            # Extraction des entités
             doc = nlp(text)
             name = next((ent.text for ent in doc.ents if ent.label_ in ["PERSON", "PER"]), "")
             skills = extract_skills(text)
@@ -157,31 +249,6 @@ def process_files(files, required_skills, min_exp, required_langs):
     
     if results:
         show_results(results, required_skills, min_exp, required_langs)
-
-def show_results(data, req_skills, min_exp, req_langs):
-    df = pd.DataFrame(data)
-    
-    filtered = df[
-        df["Compétences"].apply(lambda x: any(skill in x for skill in req_skills)) &
-        (df["Expérience"] >= min_exp) &
-        df["Langues"].apply(lambda x: any(lang in x for lang in req_langs))
-    ]
-    
-    st.success(f"✅ {len(filtered)} CV correspondent aux critères")
-    
-    for _, row in filtered.iterrows():
-        with st.expander(f"{row['Nom']} - {row['Fichier']}"):
-            cols = st.columns(2)
-            with cols[0]:
-                st.markdown(f"**Compétences:** {', '.join(row['Compétences'])}")
-                st.markdown(f"**Expérience:** {row['Expérience']} ans")
-            with cols[1]:
-                st.markdown(f"**Langues:** {', '.join(row['Langues'])}")
-                st.download_button(
-                    "Télécharger l'analyse",
-                    data=pd.DataFrame([row]).to_csv(index=False),
-                    file_name=f"analyse_{row['Nom']}.csv"
-                )
 
 if __name__ == "__main__":
     analyze_cvs()
